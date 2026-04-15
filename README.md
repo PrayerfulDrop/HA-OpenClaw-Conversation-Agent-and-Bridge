@@ -132,26 +132,41 @@ is handled via environment variables and headers:
 A safety flag (`EXECUTE_HA_ACTIONS`) controls whether actions are actually
 sent to Home Assistant.
 
-## Home Assistant custom component
+## Home Assistant custom component (HACS-friendly)
 
-Under `homeassistant_custom/openclaw_conversation/` there is a minimal
-Home Assistant custom component that exposes this bridge as a conversation
-agent.
+This repo ships a minimal Home Assistant integration under
+`custom_components/openclaw_conversation/` that exposes this bridge as a
+conversation agent.
 
-High-level usage (OpenClaw Gateway mode):
+### Install via HACS (recommended)
 
-1. Copy `homeassistant_custom/openclaw_conversation/` into your Home Assistant
-   config directory as `custom_components/openclaw_conversation/`.
-2. Restart Home Assistant.
-3. In **Settings → Devices & services → Integrations**, add **OpenClaw
+1. Make sure [HACS](https://hacs.xyz/) is installed in your Home Assistant.
+2. In HACS, go to **Integrations → Custom repositories** and add this repo:
+   - URL: `https://github.com/PrayerfulDrop/HA-OpenClaw-Conversation-Agent-and-Bridge`
+   - Category: **Integration**
+3. Install the **OpenClaw Conversation Agent** integration from HACS.
+4. Restart Home Assistant.
+
+Then in HA:
+
+1. In **Settings → Devices & services → Integrations**, add **OpenClaw
    Conversation Agent**.
-4. Set the **Bridge URL** to the URL where this service is reachable, e.g.
+2. Set the **Bridge URL** to the URL where this service is reachable, e.g.
    `http://ha-bridge:8080` or `http://llm-home:8080` depending on where you
    run the container.
-  In the agent config, paste your **Gateway token** into the optional
-  **API key** field; this value is forwarded as a bearer token to the bridge.
-5. In **Settings → Voice Assistants**, select the OpenClaw Conversation agent
+3. In the agent config, paste your **Gateway token** into the
+   **Gateway token** field; this value is forwarded as a bearer token to the
+   bridge.
+4. In **Settings → Voice Assistants**, select the OpenClaw Conversation agent
    as the conversation engine for the relevant Assist pipelines.
+
+### Manual install (without HACS)
+
+1. Copy `custom_components/openclaw_conversation/` into your Home Assistant
+   config directory as `custom_components/openclaw_conversation/`.
+2. Restart Home Assistant.
+3. Follow the same configuration steps as above (Bridge URL + Gateway token,
+   then select the agent in Voice Assistants).
 
 From there, any Assist request that uses this agent will be forwarded to
 `/v1/conversation` on the bridge, and the `reply_text` will be spoken back
