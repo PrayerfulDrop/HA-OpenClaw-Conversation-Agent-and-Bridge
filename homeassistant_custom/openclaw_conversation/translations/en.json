@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "OpenClaw Conversation Agent",
+        "description": "Configure the OpenClaw Conversation bridge.",
+        "data": {
+          "bridge_url": "Bridge URL",
+          "api_key": "Gateway token"
+        }
+      }
+    },
+    "error": {
+      "bridge_url_required": "Bridge URL is required.",
+      "bridge_url_invalid": "Bridge URL must start with http:// or https://."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OpenClaw Conversation options",
+        "data": {
+          "bridge_url": "Bridge URL",
+          "api_key": "Gateway token"
+        }
+      }
+    }
+  }
+}

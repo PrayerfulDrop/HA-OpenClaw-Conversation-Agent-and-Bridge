@@ -1,0 +1,10 @@
+{
+  "domain": "openclaw_conversation",
+  "name": "OpenClaw Conversation Agent",
+  "version": "0.2.0",
+  "documentation": "https://github.com/wardfamily1909/openclaw-ha-bridge",
+  "requirements": [],
+  "dependencies": ["conversation"],
+  "codeowners": ["@wardfamily1909"],
+  "config_flow": true
+}

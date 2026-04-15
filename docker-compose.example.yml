@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  ha-bridge:
+    build: .
+    container_name: ha-bridge
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - OPENCLAW_BASE_URL=http://openclaw-gateway:8080 # TODO: adjust
+      - HOME_ASSISTANT_BASE_URL=http://homeassistant:8123
+      - HOME_ASSISTANT_TOKEN=REPLACE_WITH_LONG_LIVED_TOKEN
+    ports:
+      - "8080:8080"
+    # If you run this on the same Docker host as OpenClaw or Home Assistant,
+    # you can attach it to the same custom network instead of publishing ports.
+    # networks:
+    #   - home-net
+
+# networks:
+#   home-net:
+#     external: true
