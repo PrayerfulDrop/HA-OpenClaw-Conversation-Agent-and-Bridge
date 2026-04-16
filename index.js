@@ -296,23 +296,6 @@ async function fetchHaSnapshot() {
       return null;
     }
 
-    const allowedDomains = new Set([
-      'light',
-      'switch',
-      'fan',
-      'climate',
-      'cover',
-      'lock',
-      'scene',
-      'script',
-      'automation',
-      'media_player',
-      'alarm_control_panel',
-      'input_boolean',
-      'binary_sensor',
-      'sensor',
-    ]);
-
     // Summarize entities to keep the payload small-ish.
     const entities = states
       .map((s) => {
@@ -327,8 +310,7 @@ async function fetchHaSnapshot() {
           room_name: attrs.room_name || null,
           state: s.state,
         };
-      })
-      .filter((e) => allowedDomains.has(e.domain));
+      });
 
     const snapshot = { entities };
     lastHaSnapshot = snapshot;
