@@ -278,8 +278,28 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
     try {
       parsed = JSON.parse(content);
     } catch (err) {
+      // If the model didn't follow the JSON contract, fall back to treating
+      // the plain content as the reply text with no actions instead of
+      // surfacing a stub error. This is safer and preserves useful answers
+      // from the brain even when it ignores the JSON schema.
       console.error('Failed to parse LLM JSON content', err, content);
-      throw new Error('LLM response was not valid JSON');
+
+      let fallbackReplyText = scrubEntityIds(content, haSnapshot);
+
+      if (sessionKey) {
+        lastTurnsBySession.set(sessionKey, {
+          text,
+          intent,
+          reply_text: fallbackReplyText,
+        });
+      }
+
+      return {
+        replyText: fallbackReplyText,
+        actions: [],
+        conversationId: conversationId || null,
+        llm_used: true,
+      };
     }
 
     let replyText =
