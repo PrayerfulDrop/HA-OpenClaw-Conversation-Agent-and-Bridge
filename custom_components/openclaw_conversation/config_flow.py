@@ -8,6 +8,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN,
@@ -55,7 +56,12 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_BRIDGE_URL): str,
                 vol.Optional(CONF_API_KEY): str,
-                vol.Optional(CONF_EXTRA_CONTEXT, default=DEFAULT_EXTRA_CONTEXT): str,
+                vol.Optional(
+                    CONF_EXTRA_CONTEXT,
+                    default=DEFAULT_EXTRA_CONTEXT,
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(multiline=True)
+                ),
             }
         )
 
@@ -98,7 +104,9 @@ class OpenClawConversationOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_EXTRA_CONTEXT,
                     default=current.get(CONF_EXTRA_CONTEXT, DEFAULT_EXTRA_CONTEXT),
-                ): str,
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(multiline=True)
+                ),
             }
         )
 
