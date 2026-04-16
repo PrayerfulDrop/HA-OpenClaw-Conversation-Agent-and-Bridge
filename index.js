@@ -1,6 +1,8 @@
 require('dotenv').config();
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -26,6 +28,41 @@ const DEBUG_BRIDGE =
 // most recently mentioned entity) without round-tripping through HA chat
 // sessions.
 const lastTurnsBySession = new Map();
+
+// Security profile settings for which domains/actions are allowed and which
+// operations require an extra confirmation step. Loaded from
+// config/ha_bridge_settings.json when present, with sane defaults.
+const defaultSecuritySettings = {
+  confirmations: {
+    locks: { lock: false, unlock: true },
+    covers: { close: false, open: true },
+    alarm: { arm: false, disarm: true },
+  },
+};
+
+let securitySettings = defaultSecuritySettings;
+try {
+  const configPath = path.join(__dirname, 'config', 'ha_bridge_settings.json');
+  if (fs.existsSync(configPath)) {
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    securitySettings = {
+      ...defaultSecuritySettings,
+      ...parsed,
+      confirmations: {
+        ...defaultSecuritySettings.confirmations,
+        ...(parsed.confirmations || {}),
+      },
+    };
+    if (DEBUG_BRIDGE) {
+      console.log('Loaded security settings from', configPath, securitySettings);
+    }
+  } else if (DEBUG_BRIDGE) {
+    console.log('Security settings file not found, using defaults');
+  }
+} catch (err) {
+  console.warn('Failed to load security settings, using defaults', err);
+}
 
 // Basic health check
 app.get('/healthz', (_req, res) => {
@@ -469,6 +506,9 @@ async function executeActions(actions) {
     'media_player',
     'fan',
     'climate',
+    'lock',
+    'cover',
+    'alarm_control_panel',
   ]);
 
   for (const action of actions) {
@@ -498,6 +538,72 @@ async function executeActions(actions) {
         error: 'DOMAIN_NOT_ALLOWED',
       });
       continue;
+    }
+
+    // Security profile: allow securing actions (lock/close/arm) but require
+    // a separate confirmation flow for unsecuring actions (unlock/open/disarm).
+    const confirmations = securitySettings.confirmations || {};
+
+    if (domain === 'lock') {
+      const lockConf = confirmations.locks || defaultSecuritySettings.confirmations.locks;
+      const isLock = serviceName === 'lock';
+      const isUnlock = serviceName === 'unlock';
+
+      if (isUnlock) {
+        if (lockConf.unlock) {
+          errors.push({
+            action,
+            error: 'UNLOCK_REQUIRES_CONFIRMATION',
+          });
+          continue;
+        }
+      } else if (!isLock) {
+        errors.push({
+          action,
+          error: 'LOCK_SERVICE_NOT_ALLOWED',
+        });
+        continue;
+      }
+    } else if (domain === 'cover') {
+      const coverConf = confirmations.covers || defaultSecuritySettings.confirmations.covers;
+      const isClose = serviceName === 'close_cover' || serviceName === 'close_cover_tilt';
+      const isOpen = serviceName === 'open_cover' || serviceName === 'open_cover_tilt';
+
+      if (isOpen) {
+        if (coverConf.open) {
+          errors.push({
+            action,
+            error: 'COVER_OPEN_REQUIRES_CONFIRMATION',
+          });
+          continue;
+        }
+      } else if (!isClose && serviceName !== 'stop_cover' && serviceName !== 'stop_cover_tilt') {
+        errors.push({
+          action,
+          error: 'COVER_SERVICE_NOT_ALLOWED',
+        });
+        continue;
+      }
+    } else if (domain === 'alarm_control_panel') {
+      const alarmConf = confirmations.alarm || defaultSecuritySettings.confirmations.alarm;
+      const isArm = serviceName.startsWith('alarm_arm_');
+      const isDisarm = serviceName === 'alarm_disarm';
+
+      if (isDisarm) {
+        if (alarmConf.disarm) {
+          errors.push({
+            action,
+            error: 'ALARM_DISARM_REQUIRES_CONFIRMATION',
+          });
+          continue;
+        }
+      } else if (!isArm) {
+        errors.push({
+          action,
+          error: 'ALARM_SERVICE_NOT_ALLOWED',
+        });
+        continue;
+      }
     }
     const url = `${HA_BASE_URL.replace(/\/$/, '')}/api/services/${domain}/${serviceName}`;
 
