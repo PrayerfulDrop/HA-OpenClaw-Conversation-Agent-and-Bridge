@@ -132,6 +132,16 @@ is handled via environment variables and headers:
 A safety flag (`EXECUTE_HA_ACTIONS`) controls whether actions are actually
 sent to Home Assistant.
 
+For bridge-side debugging, you can enable more verbose logging of outbound
+LLM calls by setting:
+
+```bash
+DEBUG_BRIDGE=true
+```
+
+This will log each `/v1/chat/completions` call (URL + model id) without
+changing behavior.
+
 ## Home Assistant custom component (HACS-friendly)
 
 This repo ships a minimal Home Assistant integration under
