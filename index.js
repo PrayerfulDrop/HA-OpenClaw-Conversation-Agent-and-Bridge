@@ -71,6 +71,13 @@ Use ha_snapshot to answer questions about the current state of the home
 or does not contain the requested information, say so instead of
 hallucinating.
 
+The userPayload may include an "intent" field to hint what the user cares
+about. For example:
+- intent == "door_open_state" → focus on whether doors are physically
+  open/closed using door/contact sensors.
+- intent == "lock_state" → focus on whether locks are locked/unlocked
+  using lock entities.
+
 For doors, many setups have both a lock entity **and** a separate contact
 or door sensor. When the user asks whether a door is open/closed, first
 look for matching contact/door sensors (for example binary_sensor.* with a
@@ -131,8 +138,20 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 
   const haSnapshot = await fetchHaSnapshot();
 
+  // Very simple intent hinting to help the brain choose the right
+  // information source (door/contact sensor vs lock) without hard-coding
+  // full NLU rules.
+  let intent = null;
+  const lowerText = (text || '').toLowerCase();
+  if (/\b(lock|locked|unlock|unlocked|secure)\b/.test(lowerText)) {
+    intent = 'lock_state';
+  } else if (/\b(open|closed|shut|ajar)\b/.test(lowerText)) {
+    intent = 'door_open_state';
+  }
+
   const userPayload = {
     text,
+    intent,
     user,
     room,
     entities,
