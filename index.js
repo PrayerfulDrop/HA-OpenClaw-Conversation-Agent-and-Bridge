@@ -29,6 +29,10 @@ const DEBUG_BRIDGE =
 // sessions.
 const lastTurnsBySession = new Map();
 
+// Pending security-sensitive actions (unlock/open/disarm) that require an
+// explicit follow-up confirmation before execution.
+const pendingSecurityBySession = new Map();
+
 // Security profile settings for which domains/actions are allowed and which
 // operations require an extra confirmation step. Loaded from
 // config/ha_bridge_settings.json when present, with sane defaults.
@@ -162,10 +166,14 @@ Safe examples include "light.*", "switch.*", "scene.*",
 "media_player.*", "fan.*", "climate.*", "lock.lock",
 "cover.close_cover", "cover.close_cover_tilt",
 "alarm_control_panel.alarm_arm_*".
-Do NOT create unlock/open/disarm actions such as "lock.unlock",
-"cover.open_cover*", or "alarm_control_panel.alarm_disarm". For those,
-explain the security rules in reply_text and return no actions; the bridge
-may handle confirmations separately.
+Unlock/open/disarm actions such as "lock.unlock", "cover.open_cover*",
+or "alarm_control_panel.alarm_disarm" are **allowed but must be
+confirmation-gated**. When the user asks to unlock, open, or disarm,
+include the appropriate action in the actions array, and make
+reply_text a clear confirmation question (for example, "Just to confirm,
+do you want me to unlock the Front Door now?"). The bridge will only
+execute those actions after an explicit follow-up confirmation from the
+user.
 
 For climate.* entities, commands like "set upstairs HVAC to cool and 72"
 should result in a 'climate.set_temperature' action (optionally combined
@@ -466,6 +474,74 @@ async function fetchHaSnapshot() {
 }
 
 /**
+ * Split actions into those that can be executed immediately and those that
+ * require an explicit confirmation step based on the security profile.
+ */
+function splitActionsBySecurityProfile(actions) {
+  const toExecute = [];
+  const toConfirm = [];
+
+  if (!Array.isArray(actions)) {
+    return { toExecute, toConfirm };
+  }
+
+  const confirmations = securitySettings.confirmations || defaultSecuritySettings.confirmations;
+
+  for (const action of actions) {
+    if (!action || action.type !== 'ha_service') {
+      toExecute.push(action);
+      continue;
+    }
+
+    const { service } = action;
+    if (!service || typeof service !== 'string' || !service.includes('.')) {
+      toExecute.push(action);
+      continue;
+    }
+
+    const [domain, serviceName] = service.split('.');
+
+    if (domain === 'lock') {
+      const lockConf = confirmations.locks || defaultSecuritySettings.confirmations.locks;
+      const isUnlock = serviceName === 'unlock';
+      if (isUnlock && lockConf.unlock) {
+        toConfirm.push(action);
+        continue;
+      }
+      toExecute.push(action);
+      continue;
+    }
+
+    if (domain === 'cover') {
+      const coverConf = confirmations.covers || defaultSecuritySettings.confirmations.covers;
+      const isOpen = serviceName === 'open_cover' || serviceName === 'open_cover_tilt';
+      if (isOpen && coverConf.open) {
+        toConfirm.push(action);
+        continue;
+      }
+      toExecute.push(action);
+      continue;
+    }
+
+    if (domain === 'alarm_control_panel') {
+      const alarmConf = confirmations.alarm || defaultSecuritySettings.confirmations.alarm;
+      const isDisarm = serviceName === 'alarm_disarm';
+      if (isDisarm && alarmConf.disarm) {
+        toConfirm.push(action);
+        continue;
+      }
+      toExecute.push(action);
+      continue;
+    }
+
+    // All other domains: execute immediately.
+    toExecute.push(action);
+  }
+
+  return { toExecute, toConfirm };
+}
+
+/**
  * Optionally execute HA service calls described in the `actions` array.
  *
  * Action schema (initial draft):
@@ -544,72 +620,6 @@ async function executeActions(actions) {
         error: 'DOMAIN_NOT_ALLOWED',
       });
       continue;
-    }
-
-    // Security profile: allow securing actions (lock/close/arm) but require
-    // a separate confirmation flow for unsecuring actions (unlock/open/disarm).
-    const confirmations = securitySettings.confirmations || {};
-
-    if (domain === 'lock') {
-      const lockConf = confirmations.locks || defaultSecuritySettings.confirmations.locks;
-      const isLock = serviceName === 'lock';
-      const isUnlock = serviceName === 'unlock';
-
-      if (isUnlock) {
-        if (lockConf.unlock) {
-          errors.push({
-            action,
-            error: 'UNLOCK_REQUIRES_CONFIRMATION',
-          });
-          continue;
-        }
-      } else if (!isLock) {
-        errors.push({
-          action,
-          error: 'LOCK_SERVICE_NOT_ALLOWED',
-        });
-        continue;
-      }
-    } else if (domain === 'cover') {
-      const coverConf = confirmations.covers || defaultSecuritySettings.confirmations.covers;
-      const isClose = serviceName === 'close_cover' || serviceName === 'close_cover_tilt';
-      const isOpen = serviceName === 'open_cover' || serviceName === 'open_cover_tilt';
-
-      if (isOpen) {
-        if (coverConf.open) {
-          errors.push({
-            action,
-            error: 'COVER_OPEN_REQUIRES_CONFIRMATION',
-          });
-          continue;
-        }
-      } else if (!isClose && serviceName !== 'stop_cover' && serviceName !== 'stop_cover_tilt') {
-        errors.push({
-          action,
-          error: 'COVER_SERVICE_NOT_ALLOWED',
-        });
-        continue;
-      }
-    } else if (domain === 'alarm_control_panel') {
-      const alarmConf = confirmations.alarm || defaultSecuritySettings.confirmations.alarm;
-      const isArm = serviceName.startsWith('alarm_arm_');
-      const isDisarm = serviceName === 'alarm_disarm';
-
-      if (isDisarm) {
-        if (alarmConf.disarm) {
-          errors.push({
-            action,
-            error: 'ALARM_DISARM_REQUIRES_CONFIRMATION',
-          });
-          continue;
-        }
-      } else if (!isArm) {
-        errors.push({
-          action,
-          error: 'ALARM_SERVICE_NOT_ALLOWED',
-        });
-        continue;
-      }
     }
     const url = `${HA_BASE_URL.replace(/\/$/, '')}/api/services/${domain}/${serviceName}`;
 
@@ -711,6 +721,53 @@ app.post('/v1/conversation', async (req, res) => {
   }|device:${room?.device_id || 'none'}|sat:${room?.satellite_id || 'none'}`;
 
   try {
+    // First, check if this looks like a confirmation for a pending
+    // security-sensitive action (unlock/open/disarm).
+    const pending = pendingSecurityBySession.get(sessionKey) || null;
+    const normalizedText = (text || '').trim().toLowerCase();
+    const isConfirmation =
+      pending &&
+      normalizedText &&
+      /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|do it|please do|confirm)\b/.test(
+        normalizedText,
+      );
+
+    if (pending && isConfirmation) {
+      pendingSecurityBySession.delete(sessionKey);
+
+      const { executed, errors } = await executeActions(pending.actions || []);
+
+      const replyText =
+        pending.confirmation_reply ||
+        'Okay, I have applied your previous request.';
+
+      const response = {
+        reply_text: replyText,
+        conversation_id: pending.conversationId || conversationId || null,
+        actions: pending.actions || [],
+        executed_actions: executed,
+        action_errors: errors,
+        debug: {
+          source: source || 'unknown',
+          received_entities: entities || [],
+          metadata: metadata || {},
+          openclaw_base_url: OPENCLAW_BASE_URL,
+          ha_configured: Boolean(HA_BASE_URL && HA_TOKEN),
+          execute_ha_actions: EXECUTE_HA_ACTIONS,
+          auth_required: Boolean(BRIDGE_API_KEY),
+          pending_security_confirmed: true,
+        },
+      };
+
+      return res.json(response);
+    }
+
+    // If there was a pending action but the user said something else,
+    // clear it so we don't accidentally apply it later.
+    if (pending && !isConfirmation) {
+      pendingSecurityBySession.delete(sessionKey);
+    }
+
     // Step 1: ask the brain what to do (currently stubbed).
     const brainResult = await callBrain({
       text,
@@ -724,8 +781,25 @@ app.post('/v1/conversation', async (req, res) => {
       sessionKey,
     });
 
-    // Step 2: if there are actions, try to execute them against HA.
-    const { executed, errors } = await executeActions(brainResult.actions);
+    // Split actions into those that can run immediately and those that
+    // require an explicit confirmation step based on the security profile.
+    const { toExecute, toConfirm } = splitActionsBySecurityProfile(
+      brainResult.actions,
+    );
+
+    if (toConfirm.length > 0) {
+      pendingSecurityBySession.set(sessionKey, {
+        actions: toConfirm,
+        createdAt: Date.now(),
+        original_text: text,
+        reply_text: brainResult.replyText,
+        conversationId: brainResult.conversationId || conversationId || null,
+      });
+    }
+
+    // Step 2: if there are actions that are safe to run immediately, try to
+    // execute them against HA.
+    const { executed, errors } = await executeActions(toExecute);
 
     const response = {
       reply_text: brainResult.replyText,
