@@ -147,8 +147,11 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 
   const url = `${llmBaseUrl.replace(/\/$/, '')}/chat/completions`;
 
+  const sessionUser = conversationId || user?.id || 'home-assistant';
+
   const body = {
     model: llmModel,
+    user: sessionUser,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(userPayload) },
