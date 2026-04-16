@@ -18,6 +18,12 @@ const EXECUTE_HA_ACTIONS =
   process.env.EXECUTE_HA_ACTIONS === '1' ||
   process.env.EXECUTE_HA_ACTIONS === 'true';
 
+// In-memory per-session memory to help with lightweight multi-turn
+// conversations (for example resolving pronouns like "it" back to the
+// most recently mentioned entity) without round-tripping through HA chat
+// sessions.
+const lastTurnsBySession = new Map();
+
 // Basic health check
 app.get('/healthz', (_req, res) => {
   res.json({ status: 'ok' });
@@ -36,7 +42,7 @@ app.get('/healthz', (_req, res) => {
  * raw LLM endpoint. For now it is accepted but unused so we can migrate in
  * small, safe steps.
  */
-async function callBrain({ text, user, room, entities, conversationId, source, metadata, gatewayToken }) {
+async function callBrain({ text, user, room, entities, conversationId, source, metadata, gatewayToken, sessionKey }) {
   const openclawBaseUrl = process.env.OPENCLAW_BASE_URL;
   const llmBaseUrl = openclawBaseUrl || process.env.LLM_BASE_URL;
   // Prefer a per-request gateway token when present; fall back to a static
@@ -77,6 +83,13 @@ about. For example:
   open/closed using door/contact sensors.
 - intent == "lock_state" → focus on whether locks are locked/unlocked
   using lock entities.
+
+The userPayload may also include a "previous_turn" object with the last
+user question and assistant reply for this user/device. Use it to resolve
+pronouns like "it", "that", or "there" when the new question is
+ambiguous. For example, if previous_turn.text mentioned the "Front Door"
+and the new question is "Is it locked?", assume "it" refers to the Front
+Door unless the user clearly asks about a different entity.
 
 For doors, many setups have both a lock entity **and** a separate contact
 or door sensor. When the user asks whether a door is open/closed, first
@@ -138,6 +151,8 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 
   const haSnapshot = await fetchHaSnapshot();
 
+  const previousTurn = sessionKey ? lastTurnsBySession.get(sessionKey) || null : null;
+
   // Very simple intent hinting to help the brain choose the right
   // information source (door/contact sensor vs lock) without hard-coding
   // full NLU rules.
@@ -152,6 +167,7 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
   const userPayload = {
     text,
     intent,
+    previous_turn: previousTurn,
     user,
     room,
     entities,
@@ -218,6 +234,14 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
     // Scrub any raw entity_ids out of the user-facing reply and prefer
     // friendly names when possible.
     replyText = scrubEntityIds(replyText, haSnapshot);
+
+    if (sessionKey) {
+      lastTurnsBySession.set(sessionKey, {
+        text,
+        intent,
+        reply_text: replyText,
+      });
+    }
 
     const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
 
@@ -513,6 +537,13 @@ app.post('/v1/conversation', async (req, res) => {
     return res.status(400).json({ error: 'Missing required field: text' });
   }
 
+  // Build a simple, stable-ish session key so we can keep a tiny amount of
+  // per-user/device context inside the bridge (for example, the last
+  // referenced entity) without relying on HA's conversation_id semantics.
+  const sessionKey = `source:${source || 'unknown'}|user:${
+    user?.id || 'anon'
+  }|device:${room?.device_id || 'none'}|sat:${room?.satellite_id || 'none'}`;
+
   try {
     // Step 1: ask the brain what to do (currently stubbed).
     const brainResult = await callBrain({
@@ -524,6 +555,7 @@ app.post('/v1/conversation', async (req, res) => {
       source,
       metadata,
       gatewayToken,
+      sessionKey,
     });
 
     // Step 2: if there are actions, try to execute them against HA.
