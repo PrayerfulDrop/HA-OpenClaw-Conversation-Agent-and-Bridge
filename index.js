@@ -561,6 +561,88 @@ function splitActionsBySecurityProfile(actions) {
   return { toExecute, toConfirm };
 }
 
+function getFriendlyNameFromSnapshot(entityId, haSnapshot) {
+  if (!entityId || !haSnapshot || !Array.isArray(haSnapshot.entities)) {
+    return null;
+  }
+  const match = haSnapshot.entities.find((e) => e.entity_id === entityId);
+  return match?.friendly_name || null;
+}
+
+function buildConfirmationReply(pending, haSnapshot) {
+  if (!pending || !Array.isArray(pending.actions) || pending.actions.length === 0) {
+    return null;
+  }
+
+  const action = pending.actions[0];
+  if (!action || action.type !== 'ha_service') {
+    return null;
+  }
+
+  const { service, entity_id, target } = action;
+  if (!service || typeof service !== 'string' || !service.includes('.')) {
+    return null;
+  }
+
+  const [domain, serviceName] = service.split('.');
+
+  const ids = [];
+  if (entity_id) {
+    if (Array.isArray(entity_id)) ids.push(...entity_id);
+    else ids.push(entity_id);
+  }
+  if (target && target.entity_id) {
+    if (Array.isArray(target.entity_id)) ids.push(...target.entity_id);
+    else ids.push(target.entity_id);
+  }
+
+  const uniqueIds = Array.from(new Set(ids));
+  const names = uniqueIds
+    .map((id) => getFriendlyNameFromSnapshot(id, haSnapshot) || id)
+    .filter(Boolean);
+
+  const friendlyList =
+    names.length === 1
+      ? names[0]
+      : names.length > 1
+      ? names.join(', ')
+      : 'requested entity';
+
+  if (domain === 'lock') {
+    if (serviceName === 'unlock') {
+      return `The ${friendlyList} has been unlocked.`;
+    }
+    if (serviceName === 'lock') {
+      return `The ${friendlyList} has been locked.`;
+    }
+  }
+
+  if (domain === 'cover') {
+    if (serviceName === 'open_cover' || serviceName === 'open_cover_tilt') {
+      return `The ${friendlyList} has been opened.`;
+    }
+    if (
+      serviceName === 'close_cover' ||
+      serviceName === 'close_cover_tilt' ||
+      serviceName === 'stop_cover' ||
+      serviceName === 'stop_cover_tilt'
+    ) {
+      return `The ${friendlyList} has been closed.`;
+    }
+  }
+
+  if (domain === 'alarm_control_panel') {
+    if (serviceName === 'alarm_disarm') {
+      return 'The alarm has been disarmed.';
+    }
+    if (serviceName.startsWith('alarm_arm_')) {
+      return 'The alarm has been armed.';
+    }
+  }
+
+  return null;
+}
+
 /**
  * Optionally execute HA service calls described in the `actions` array.
  *
@@ -757,7 +839,9 @@ app.post('/v1/conversation', async (req, res) => {
 
       const { executed, errors } = await executeActions(pending.actions || []);
 
+      const haSnapshot = await fetchHaSnapshot();
       const replyText =
+        buildConfirmationReply(pending, haSnapshot) ||
         pending.confirmation_reply ||
         'Okay, I have applied your previous request.';
 
