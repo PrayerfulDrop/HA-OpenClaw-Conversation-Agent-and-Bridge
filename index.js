@@ -171,10 +171,14 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
       throw new Error('LLM response was not valid JSON');
     }
 
-    const replyText =
+    let replyText =
       typeof parsed.reply_text === 'string'
         ? parsed.reply_text
         : `Sorry, I could not interpret that request.`;
+
+    // Scrub any raw entity_ids out of the user-facing reply and prefer
+    // friendly names when possible.
+    replyText = scrubEntityIds(replyText, haSnapshot);
 
     const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
 
@@ -209,6 +213,36 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 const HA_SNAPSHOT_TTL_MS = 5000; // 5 seconds
 let lastHaSnapshot = null;
 let lastHaSnapshotTs = 0;
+
+/**
+ * Replace raw Home Assistant entity_ids in reply text with friendly names
+ * when possible, and strip any remaining ids as a last resort.
+ */
+function scrubEntityIds(replyText, haSnapshot) {
+  if (!replyText || typeof replyText !== 'string') {
+    return replyText;
+  }
+
+  let result = replyText;
+
+  // Prefer explicit mappings from the HA snapshot when available.
+  if (haSnapshot && Array.isArray(haSnapshot.entities)) {
+    for (const entity of haSnapshot.entities) {
+      const id = entity?.entity_id;
+      const name = entity?.friendly_name;
+      if (!id || !name) continue;
+
+      const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`\\b${escaped}\\b`, 'g');
+      result = result.replace(pattern, String(name));
+    }
+  }
+
+  // As a safety net, strip any remaining domain.object_id-style tokens.
+  result = result.replace(/\b[a-zA-Z_]+\.[a-zA-Z0-9_]+\b/g, 'that entity');
+
+  return result;
+}
 
 /**
  * Fetch a snapshot of Home Assistant entities for context.
