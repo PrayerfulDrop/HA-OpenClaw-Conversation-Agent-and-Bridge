@@ -73,11 +73,10 @@ hallucinating.
 
 For doors, many setups have both a lock entity **and** a separate contact
 or door sensor. When the user asks whether a door is open/closed, first
-look for matching contact/door sensors (for example
-`binary_sensor.*` with a door/entry device_class or a friendly_name that
-matches the lock/door name) and answer based on those sensors. Only fall
-back to describing the lock state when no relevant door/contact sensor is
-available.
+look for matching contact/door sensors (for example binary_sensor.* with a
+door/entry device_class or a friendly_name that matches the lock/door name)
+and answer based on those sensors. Only fall back to describing the lock
+state when no relevant door/contact sensor is available.
 
 When referring to entities in reply_text, always use the human-friendly
 "friendly_name" (or a natural-language description), **never** raw Home
