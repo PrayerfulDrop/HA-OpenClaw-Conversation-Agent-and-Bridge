@@ -309,6 +309,8 @@ async function fetchHaSnapshot() {
       'media_player',
       'alarm_control_panel',
       'input_boolean',
+      'binary_sensor',
+      'sensor',
     ]);
 
     // Summarize entities to keep the payload small-ish.
