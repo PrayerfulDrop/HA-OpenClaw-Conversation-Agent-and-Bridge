@@ -6,7 +6,8 @@
         "description": "Configure the OpenClaw Conversation bridge.",
         "data": {
           "bridge_url": "Bridge URL",
-          "api_key": "Gateway token"
+          "api_key": "Gateway token",
+          "extra_context": "Additional brain context (optional)"
         }
       }
     },
@@ -21,7 +22,8 @@
         "title": "OpenClaw Conversation options",
         "data": {
           "bridge_url": "Bridge URL",
-          "api_key": "Gateway token"
+          "api_key": "Gateway token",
+          "extra_context": "Additional brain context (optional)"
         }
       }
     }

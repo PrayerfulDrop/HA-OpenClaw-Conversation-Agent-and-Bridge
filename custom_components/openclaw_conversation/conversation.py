@@ -24,7 +24,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 
-from .const import DOMAIN, CONF_BRIDGE_URL, CONF_API_KEY
+from .const import (
+    DOMAIN,
+    CONF_BRIDGE_URL,
+    CONF_API_KEY,
+    CONF_EXTRA_CONTEXT,
+)
 
 
 async def async_setup_entry(
@@ -37,13 +42,14 @@ async def async_setup_entry(
     data = {**entry.data, **entry.options}
     bridge_url: str = data.get(CONF_BRIDGE_URL, "").rstrip("/")
     api_key: str | None = data.get(CONF_API_KEY) or None
+    extra_context: str = data.get(CONF_EXTRA_CONTEXT, "") or ""
 
     if not bridge_url:
         # If misconfigured, we still add the entity, but it will error on use.
         bridge_url = ""
 
     async_add_entities([
-        OpenClawConversationEntity(entry, bridge_url, api_key)
+        OpenClawConversationEntity(entry, bridge_url, api_key, extra_context)
     ])
 
 
@@ -60,11 +66,13 @@ class OpenClawConversationEntity(
         entry: ConfigEntry,
         bridge_url: str,
         api_key: str | None = None,
+        extra_context: str = "",
     ) -> None:
         super().__init__()
         self.entry = entry
         self._bridge_url = bridge_url
         self._api_key = api_key
+        self._extra_context = extra_context
 
         # Make sure this shows up with a clear name in the HA UI
         self._attr_name = "OpenClaw Conversation"
@@ -114,6 +122,9 @@ class OpenClawConversationEntity(
                 "language": user_input.language,
                 "context": user_input.context.as_dict(),
                 "agent_id": user_input.agent_id,
+                "openclaw": {
+                    "user_context": self._extra_context,
+                },
             },
         }
 

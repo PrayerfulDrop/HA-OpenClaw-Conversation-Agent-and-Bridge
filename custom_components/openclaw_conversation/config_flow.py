@@ -9,7 +9,13 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-from .const import DOMAIN, CONF_BRIDGE_URL, CONF_API_KEY
+from .const import (
+    DOMAIN,
+    CONF_BRIDGE_URL,
+    CONF_API_KEY,
+    CONF_EXTRA_CONTEXT,
+    DEFAULT_EXTRA_CONTEXT,
+)
 
 
 class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -31,12 +37,17 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "bridge_url_invalid"
 
             if not errors:
-                # We store both bridge URL and optional API key in the entry data.
+                # We store bridge URL, optional Gateway token, and optional
+                # extra context in the entry data.
                 return self.async_create_entry(
                     title="OpenClaw Conversation",
                     data={
                         CONF_BRIDGE_URL: bridge_url,
                         CONF_API_KEY: (user_input.get(CONF_API_KEY) or "").strip(),
+                        CONF_EXTRA_CONTEXT: (
+                            user_input.get(CONF_EXTRA_CONTEXT)
+                            or DEFAULT_EXTRA_CONTEXT
+                        ).strip(),
                     },
                 )
 
@@ -44,6 +55,7 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_BRIDGE_URL): str,
                 vol.Optional(CONF_API_KEY): str,
+                vol.Optional(CONF_EXTRA_CONTEXT, default=DEFAULT_EXTRA_CONTEXT): str,
             }
         )
 
@@ -82,6 +94,10 @@ class OpenClawConversationOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_API_KEY,
                     default=current.get(CONF_API_KEY, ""),
+                ): str,
+                vol.Optional(
+                    CONF_EXTRA_CONTEXT,
+                    default=current.get(CONF_EXTRA_CONTEXT, DEFAULT_EXTRA_CONTEXT),
                 ): str,
             }
         )
