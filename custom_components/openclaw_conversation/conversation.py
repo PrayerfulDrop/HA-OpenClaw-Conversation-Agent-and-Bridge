@@ -181,5 +181,5 @@ class OpenClawConversationEntity(
         return conversation.ConversationResult(
             conversation_id=conversation_id,
             response=response,
-            continue_conversation=False,
+            continue_conversation=True,
         )
