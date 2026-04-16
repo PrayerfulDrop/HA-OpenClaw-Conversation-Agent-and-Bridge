@@ -276,6 +276,7 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 const HA_SNAPSHOT_TTL_MS = 5000; // 5 seconds
 let lastHaSnapshot = null;
 let lastHaSnapshotTs = 0;
+const MAX_HA_SNAPSHOT_CHARS = 120000; // soft cap to avoid LLM context overflow
 
 /**
  * Replace raw Home Assistant entity_ids in reply text with friendly names
@@ -343,22 +344,70 @@ async function fetchHaSnapshot() {
     }
 
     // Summarize entities to keep the payload small-ish.
-    const entities = states
-      .map((s) => {
-        const entityId = s.entity_id || '';
-        const [domain] = entityId.split('.');
-        const attrs = s.attributes || {};
-        return {
-          entity_id: entityId,
-          domain,
-          friendly_name: attrs.friendly_name || null,
-          area_id: attrs.area_id || null,
-          room_name: attrs.room_name || null,
-          state: s.state,
-        };
-      });
+    let entities = states.map((s) => {
+      const entityId = s.entity_id || '';
+      const [domain] = entityId.split('.');
+      const attrs = s.attributes || {};
+      return {
+        entity_id: entityId,
+        domain,
+        friendly_name: attrs.friendly_name || null,
+        area_id: attrs.area_id || null,
+        room_name: attrs.room_name || null,
+        device_class: attrs.device_class || null,
+        state: s.state,
+      };
+    });
 
-    const snapshot = { entities };
+    // If the snapshot is too large for comfortable LLM context, trim it in a
+    // structured way while keeping the most relevant domains.
+    let snapshot = { entities };
+    let approxSize = JSON.stringify(snapshot).length;
+    if (approxSize > MAX_HA_SNAPSHOT_CHARS) {
+      const priorityDomains = new Set([
+        'lock',
+        'cover',
+        'alarm_control_panel',
+        'binary_sensor',
+        'climate',
+        'fan',
+        'media_player',
+        'light',
+        'switch',
+        'scene',
+        'script',
+        'input_boolean',
+      ]);
+
+      entities = entities.filter((e) => priorityDomains.has(e.domain));
+      snapshot = { entities };
+      approxSize = JSON.stringify(snapshot).length;
+    }
+
+    if (approxSize > MAX_HA_SNAPSHOT_CHARS) {
+      const allowedBinaryDeviceClasses = new Set([
+        'door',
+        'opening',
+        'window',
+        'garage_door',
+        'lock',
+      ]);
+
+      entities = entities.filter((e) => {
+        if (e.domain !== 'binary_sensor') return true;
+        const dc = e.device_class;
+        if (!dc) return false;
+        return allowedBinaryDeviceClasses.has(dc);
+      });
+      snapshot = { entities };
+      approxSize = JSON.stringify(snapshot).length;
+    }
+
+    if (approxSize > MAX_HA_SNAPSHOT_CHARS) {
+      // Final safety: hard cap
+      entities = entities.slice(0, 800);
+      snapshot = { entities };
+    }
     lastHaSnapshot = snapshot;
     lastHaSnapshotTs = now;
     return snapshot;
