@@ -45,6 +45,7 @@ async function callBrain({ text, user, room, entities, conversationId, source, m
   const llmModel = openclawBaseUrl
     ? 'openclaw/default'
     : process.env.LLM_MODEL || 'gpt-4.1-mini';
+  const userContext = metadata?.openclaw?.user_context || '';
 
   // Fallback stub if no LLM is configured yet.
   if (!llmBaseUrl) {
@@ -60,7 +61,7 @@ async function callBrain({ text, user, room, entities, conversationId, source, m
     };
   }
 
-  const systemPrompt = `You are the home automation brain for a smart home.
+  const baseSystemPrompt = `You are the home automation brain for a smart home.
 You receive user utterances plus structured context from Home Assistant
 (user info, room, visible entities, metadata) as well as an optional
 snapshot of Home Assistant entities and states (ha_snapshot).
@@ -124,6 +125,10 @@ Schema:
 }
 
 Keep actions minimal and safe by default. If in doubt, ask a clarifying question in reply_text and return an empty actions array.`;
+
+  const systemPrompt = userContext
+    ? `${baseSystemPrompt}\n\nUser-specific context (from Home Assistant configuration):\n${userContext}\n`
+    : baseSystemPrompt;
 
   const haSnapshot = await fetchHaSnapshot();
 
