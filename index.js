@@ -18,6 +18,9 @@ const EXECUTE_HA_ACTIONS =
   process.env.EXECUTE_HA_ACTIONS === '1' ||
   process.env.EXECUTE_HA_ACTIONS === 'true';
 
+const DEBUG_BRIDGE =
+  process.env.DEBUG_BRIDGE === '1' || process.env.DEBUG_BRIDGE === 'true';
+
 // In-memory per-session memory to help with lightweight multi-turn
 // conversations (for example resolving pronouns like "it" back to the
 // most recently mentioned entity) without round-tripping through HA chat
@@ -195,7 +198,9 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
   };
 
   try {
-    console.log('callBrain ->', url, 'model=', llmModel);
+    if (DEBUG_BRIDGE) {
+      console.log('callBrain ->', url, 'model=', llmModel);
+    }
     const resp = await fetch(url, {
       method: 'POST',
       headers: {
