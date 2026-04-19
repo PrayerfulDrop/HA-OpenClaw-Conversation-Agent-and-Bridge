@@ -199,13 +199,22 @@ services:
       # Make sure `gateway.http.endpoints.chatCompletions.enabled` is true.
       - OPENCLAW_BASE_URL=http://openclaw-gateway:18789/v1
 
+      # Optional but recommended: dedicated HA investigative agent
+      # When set, ha-bridge will prefer this model when calling the
+      # OpenClaw Gateway (unless HA explicitly overrides it via
+      # metadata.openclaw.agent_model).
+      - OPENCLAW_AGENT_MODEL=openclaw/ha-bridge
+
       # Home Assistant base URL and long-lived access token
       - HOME_ASSISTANT_BASE_URL=http://homeassistant:8123
       - HOME_ASSISTANT_TOKEN=YOUR_HA_LONG_LIVED_TOKEN
 
       # Optional: explicitly set the model id for the Gateway
-      # (default is `openclaw/default` when OPENCLAW_BASE_URL is set)
-      - LLM_MODEL=openclaw/default
+      # When OPENCLAW_BASE_URL is set, the bridge ignores LLM_MODEL and
+      # instead uses, in order of precedence:
+      #   1) metadata.openclaw.agent_model
+      #   2) OPENCLAW_AGENT_MODEL
+      #   3) openclaw/default
 
       # Only enable this once you are confident in the safety profile.
       - EXECUTE_HA_ACTIONS=true
@@ -234,11 +243,182 @@ If you prefer a one-off `docker run` instead of Compose, the equivalent is
 roughly:
 
 ```bash
+
+```bash
 docker run -d --name ha-bridge --restart unless-stopped \
   -p 8080:8080 \
   -e OPENCLAW_BASE_URL=http://openclaw-gateway:18789/v1 \
+  -e OPENCLAW_AGENT_MODEL=openclaw/ha-bridge \
   -e HOME_ASSISTANT_BASE_URL=http://homeassistant:8123 \
   -e HOME_ASSISTANT_TOKEN=YOUR_HA_LONG_LIVED_TOKEN \
   -e EXECUTE_HA_ACTIONS=true \
   ha-bridge:local
 ```
+
+## Configuring the OpenClaw HA agent (reproducible setup)
+
+The bridge is designed to talk to a dedicated OpenClaw agent for
+Home Assistant and infrastructure‑adjacent questions. The recommended
+convention is:
+
+- **Agent id:** `ha-bridge`
+- **Model string:** `openclaw/ha-bridge`
+
+### One-time agent setup on the OpenClaw host
+
+Run these commands on the machine where the OpenClaw Gateway is running:
+
+```bash
+# Create a dedicated HA agent that reuses the main workspace
+openclaw agents add ha-bridge \
+  --workspace ~/.openclaw/workspace \
+  --non-interactive || true
+```
+
+This creates an `ha-bridge` agent that shares the same workspace as your
+main agent. You can confirm it with:
+
+```bash
+openclaw agents list
+```
+
+### Pointing ha-bridge at the HA agent
+
+With the agent in place, set `OPENCLAW_AGENT_MODEL` for the ha-bridge
+container:
+
+```yaml
+environment:
+  - OPENCLAW_BASE_URL=http://openclaw-gateway:18789/v1
+  - OPENCLAW_AGENT_MODEL=openclaw/ha-bridge
+  - HOME_ASSISTANT_BASE_URL=http://homeassistant:8123
+  - HOME_ASSISTANT_TOKEN=YOUR_HA_LONG_LIVED_TOKEN
+  - EXECUTE_HA_ACTIONS=true
+```
+
+The effective model used for Gateway calls will then be:
+
+1. `metadata.openclaw.agent_model` (if Home Assistant explicitly sets it)
+2. `OPENCLAW_AGENT_MODEL` (`openclaw/ha-bridge` in this example)
+3. `openclaw/default` fallback
+
+If `OPENCLAW_AGENT_MODEL` is unset, behavior is unchanged from prior
+versions (the default `openclaw/default` model is used when
+`OPENCLAW_BASE_URL` is configured).
+
+### Manual recovery if automatic setup fails
+
+If you ever suspect the HA agent was not created correctly, you can
+re-run the one‑time setup step and restart ha-bridge:
+
+```bash
+openclaw agents add ha-bridge \
+  --workspace ~/.openclaw/workspace \
+  --non-interactive || true
+
+docker restart ha-bridge
+```
+
+Then test from Home Assistant Assist with a simple utterance such as
+"What is your name?". The request should route through the
+`openclaw/ha-bridge` model when `OPENCLAW_AGENT_MODEL` is set.
+
+## Generic investigative questions (no per-scenario stubs)
+
+The bridge is intentionally **generic**: once it is pointed at an OpenClaw
+Gateway, you should not need to add new HTTP endpoints or hard-coded
+"scenario" handlers here to support questions like
+"what cron jobs are running on &lt;server&gt;?" or
+"how many Wi‑Fi devices are on the network?".
+
+Instead, the behavior is:
+
+- The bridge forwards text + lightweight context to the Gateway via the
+  OpenAI-compatible `/v1/chat/completions` surface.
+- A configured OpenClaw agent (for example `openclaw/ha-bridge`) decides
+  how to answer, including when to use tools like `exec` to run
+  **read-only diagnostics** against your own infrastructure.
+- The bridge enforces the security split:
+  - Requests that look like **HA control** ("turn on", "set", "lock",
+    "unlock", "open", "close", "arm", "disarm", etc.) are routed through
+    `/v1/conversation` in **control mode** and may result in Home Assistant
+    service calls when `EXECUTE_HA_ACTIONS=true`.
+  - Requests that look like **read-only / investigative** questions (plain
+    questions that don’t start with imperative verbs) are handled in an
+    **info-only** mode: the agent may run read-only checks (including SSH
+    commands via OpenClaw tools), but the bridge will not execute HA actions
+    for them.
+
+### OpenClaw-side requirements (reproducible setup)
+
+To make this generic behavior work on any OpenClaw deployment:
+
+1. **Enable the Gateway HTTP chat-completions surface**
+
+   In `~/.openclaw/openclaw.json`:
+
+   ```json5
+   {
+     gateway: {
+       http: {
+         endpoints: {
+           chatCompletions: { enabled: true },
+         },
+       },
+     },
+   }
+   ```
+
+2. **Describe servers in config, not code**
+
+   In the agent workspace used by the Gateway (for example the default
+   `~/.openclaw/workspace`), add a config file such as
+   `config/ha_servers.json` (you can start from
+   `config/ha_servers.example.json` in this repo):
+
+   ```json
+   {
+     "llm-home": {
+       "ssh": "user@llm-home.local",
+       "role": "llm-server"
+     },
+     "media-server": {
+       "ssh": "user@media-server.local",
+       "role": "media-server"
+     }
+   }
+   ```
+
+   The HA agent is expected to read this configuration (or equivalent
+   context such as TOOLS.md) and decide which host to inspect when the
+   user asks about a particular server.
+
+3. **Use generic, read-only helpers for inspection**
+
+   This workspace also provides a generic helper script:
+
+   ```bash
+   scripts/ha_server_inspect.sh <label> <ssh_target>
+   ```
+
+   The HA agent should call this script via OpenClaw's exec/SSH tools to
+   gather information about cron, systemd timers, OS, and (optionally) apt
+   upgradable packages on a host. The script is intentionally **read-only**
+   and should not be modified to perform updates or restarts.
+
+4. **Ask before wiring new hosts**
+
+   If a user asks about a host that is not present in
+   `config/ha_servers.json`, the HA agent should:
+
+   - Explain that it does not yet have read-only access to that host.
+   - Ask the user if they want to wire it up.
+   - Provide concrete setup instructions (for example, running a small
+     helper script on the OpenClaw host to add the host to
+     `config/ha_servers.json`), rather than attempting to modify SSH or
+     config directly via the HA pathway.
+
+With this setup, new investigative questions routed through HA → ha-bridge →
+OpenClaw do **not** require any new per-scenario HTTP handlers in this repo;
+they are handled generically by the OpenClaw agent and its toolset, with
+per-host details living in workspace config instead of code.

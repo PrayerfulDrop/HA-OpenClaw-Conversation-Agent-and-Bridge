@@ -29,6 +29,8 @@ from .const import (
     CONF_BRIDGE_URL,
     CONF_API_KEY,
     CONF_EXTRA_CONTEXT,
+    CONF_AGENT_MODEL,
+    DEFAULT_AGENT_MODEL,
 )
 
 
@@ -43,13 +45,14 @@ async def async_setup_entry(
     bridge_url: str = data.get(CONF_BRIDGE_URL, "").rstrip("/")
     api_key: str | None = data.get(CONF_API_KEY) or None
     extra_context: str = data.get(CONF_EXTRA_CONTEXT, "") or ""
+    agent_model: str = data.get(CONF_AGENT_MODEL, DEFAULT_AGENT_MODEL) or DEFAULT_AGENT_MODEL
 
     if not bridge_url:
         # If misconfigured, we still add the entity, but it will error on use.
         bridge_url = ""
 
     async_add_entities([
-        OpenClawConversationEntity(entry, bridge_url, api_key, extra_context)
+        OpenClawConversationEntity(entry, bridge_url, api_key, extra_context, agent_model)
     ])
 
 
@@ -67,12 +70,14 @@ class OpenClawConversationEntity(
         bridge_url: str,
         api_key: str | None = None,
         extra_context: str = "",
+        agent_model: str = DEFAULT_AGENT_MODEL,
     ) -> None:
         super().__init__()
         self.entry = entry
         self._bridge_url = bridge_url
         self._api_key = api_key
         self._extra_context = extra_context
+        self._agent_model = agent_model or DEFAULT_AGENT_MODEL
 
         # Make sure this shows up with a clear name in the HA UI
         self._attr_name = "OpenClaw Conversation"
@@ -124,6 +129,7 @@ class OpenClawConversationEntity(
                 "agent_id": user_input.agent_id,
                 "openclaw": {
                     "user_context": self._extra_context,
+                    "agent_model": self._agent_model,
                 },
             },
         }

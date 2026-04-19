@@ -15,7 +15,9 @@ from .const import (
     CONF_BRIDGE_URL,
     CONF_API_KEY,
     CONF_EXTRA_CONTEXT,
+    CONF_AGENT_MODEL,
     DEFAULT_EXTRA_CONTEXT,
+    DEFAULT_AGENT_MODEL,
 )
 
 
@@ -38,8 +40,8 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "bridge_url_invalid"
 
             if not errors:
-                # We store bridge URL, optional Gateway token, and optional
-                # extra context in the entry data.
+                # We store bridge URL, optional Gateway token, optional
+                # extra context, and optional agent model in the entry data.
                 return self.async_create_entry(
                     title="OpenClaw Conversation",
                     data={
@@ -49,6 +51,10 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             user_input.get(CONF_EXTRA_CONTEXT)
                             or DEFAULT_EXTRA_CONTEXT
                         ).strip(),
+                        CONF_AGENT_MODEL: (
+                            user_input.get(CONF_AGENT_MODEL)
+                            or DEFAULT_AGENT_MODEL
+                        ).strip(),
                     },
                 )
 
@@ -56,6 +62,10 @@ class OpenClawConversationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_BRIDGE_URL): str,
                 vol.Optional(CONF_API_KEY): str,
+                vol.Optional(
+                    CONF_AGENT_MODEL,
+                    default=DEFAULT_AGENT_MODEL,
+                ): str,
                 vol.Optional(
                     CONF_EXTRA_CONTEXT,
                     default=DEFAULT_EXTRA_CONTEXT,
@@ -100,6 +110,10 @@ class OpenClawConversationOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_API_KEY,
                     default=current.get(CONF_API_KEY, ""),
+                ): str,
+                vol.Optional(
+                    CONF_AGENT_MODEL,
+                    default=current.get(CONF_AGENT_MODEL, DEFAULT_AGENT_MODEL),
                 ): str,
                 vol.Optional(
                     CONF_EXTRA_CONTEXT,

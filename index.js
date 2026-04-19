@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
 
 const app = express();
 app.use(express.json());
@@ -14,6 +15,28 @@ const OPENCLAW_BASE_URL = process.env.OPENCLAW_BASE_URL || null;
 const HA_BASE_URL = process.env.HOME_ASSISTANT_BASE_URL || null;
 const HA_TOKEN = process.env.HOME_ASSISTANT_TOKEN || null;
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || null;
+
+// Optional UniFi controller config for richer read-only observability
+// (for example, answering "how many Wi-Fi devices are on my network?").
+//
+// These are intentionally environment variables so secrets stay out of
+// the repo and can be injected via Docker or systemd:
+// - UNIFI_BASE_URL (e.g. "https://192.168.4.1")
+// - UNIFI_USERNAME
+// - UNIFI_PASSWORD
+// - UNIFI_SITE (optional, default "default")
+const UNIFI_BASE_URL = process.env.UNIFI_BASE_URL || null;
+const UNIFI_USERNAME = process.env.UNIFI_USERNAME || null;
+const UNIFI_PASSWORD = process.env.UNIFI_PASSWORD || null;
+const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
+
+// Optional SSH target for the Plex host. This is now only used by
+// legacy helper code; new investigative behavior should come from
+// config-driven tools (see README). It remains here for backwards
+// compatibility and can be removed in a future major version.
+// NOTE: The compiled container currently has this defined twice; the
+// source of truth for future builds is this single definition.
+const PLEX_SSH = process.env.PLEX_SSH || 'wardfamily1909@192.168.6.196';
 
 // Safety: require explicit opt-in before executing HA actions
 const EXECUTE_HA_ACTIONS =
@@ -68,9 +91,214 @@ try {
   console.warn('Failed to load security settings, using defaults', err);
 }
 
+async function runSshCommand(args, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    execFile('ssh', args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = stderr && String(stderr).trim() ? stderr : err.message;
+        if (DEBUG_BRIDGE) {
+          console.error('SSH command failed', args.join(' '), msg);
+        }
+        return reject(new Error(msg));
+      }
+      resolve(stdout || '');
+    });
+  });
+}
+
+async function fetchServerCronSnapshot({ ssh, name, role }) {
+  try {
+    const stdout = await runSshCommand(
+      [
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=no',
+        '-o',
+        'UserKnownHostsFile=/dev/null',
+        ssh,
+        'set -e; echo "---CRONTAB_ROOT---"; sudo crontab -l 2>/dev/null || echo "NO_CRONTAB_ROOT"; echo "---CRONTAB_USER---"; crontab -l 2>/dev/null || echo "NO_CRONTAB_USER";',
+      ],
+      10000,
+    );
+
+    const rootMarker = '---CRONTAB_ROOT---';
+    const userMarker = '---CRONTAB_USER---';
+
+    const rootIdx = stdout.indexOf(rootMarker);
+    const userIdx = stdout.indexOf(userMarker);
+
+    let rootBlock = '';
+    let userBlock = '';
+
+    if (rootIdx >= 0 && userIdx > rootIdx) {
+      rootBlock = stdout.slice(rootIdx + rootMarker.length, userIdx);
+      userBlock = stdout.slice(userIdx + userMarker.length);
+    }
+
+    const parseCron = (block) =>
+      block
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#') && !/^NO_CRONTAB_/.test(l));
+
+    const rootCron = parseCron(rootBlock);
+    const userCron = parseCron(userBlock);
+
+    return {
+      host: name,
+      role,
+      cron: {
+        root: rootCron,
+        user: userCron,
+      },
+      last_checked: new Date().toISOString(),
+    };
+  } catch (err) {
+    if (DEBUG_BRIDGE) {
+      console.error('Failed to fetch cron snapshot for', ssh, err.message || err);
+    }
+    return null;
+  }
+}
+
+async function fetchUnifiClientSnapshot() {
+  if (!UNIFI_BASE_URL || !UNIFI_USERNAME || !UNIFI_PASSWORD) {
+    return null;
+  }
+
+  try {
+    const base = UNIFI_BASE_URL.replace(/\/$/, '');
+
+    // Use curl with -k to tolerate the controller's self-signed cert. This
+    // mirrors the manual curl flow we validated from the host.
+    const loginPayload = JSON.stringify({
+      username: UNIFI_USERNAME,
+      password: UNIFI_PASSWORD,
+      rememberMe: true,
+    });
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        'curl',
+        [
+          '-sSk',
+          '-c',
+          '/tmp/unifi-cookie.txt',
+          '-X',
+          'POST',
+          `${base}/api/auth/login`,
+          '-H',
+          'Content-Type: application/json',
+          '--data',
+          loginPayload,
+        ],
+        { timeout: 15000 },
+        (err, stdout, stderr) => {
+          if (err) {
+            if (DEBUG_BRIDGE) {
+              console.error('UniFi login curl failed', err.message || err, stderr || '');
+            }
+            return reject(err);
+          }
+          resolve(stdout || '');
+        },
+      );
+    });
+
+    const clientsJson = await new Promise((resolve, reject) => {
+      execFile(
+        'curl',
+        [
+          '-sSk',
+          '-b',
+          '/tmp/unifi-cookie.txt',
+          `${base}/proxy/network/api/s/${encodeURIComponent(UNIFI_SITE)}/stat/sta`,
+        ],
+        { timeout: 15000 },
+        (err, stdout, stderr) => {
+          if (err) {
+            if (DEBUG_BRIDGE) {
+              console.error('UniFi clients curl failed', err.message || err, stderr || '');
+            }
+            return reject(err);
+          }
+          resolve(stdout || '');
+        },
+      );
+    });
+
+    const json = JSON.parse(clientsJson);
+    const data = Array.isArray(json?.data) ? json.data : [];
+
+    const wifiClients = data.filter((c) => !c.is_wired);
+
+    return {
+      controller_url: UNIFI_BASE_URL,
+      site: UNIFI_SITE,
+      wifi_client_count: wifiClients.length,
+      total_client_count: data.length,
+      last_checked: new Date().toISOString(),
+    };
+  } catch (err) {
+    if (DEBUG_BRIDGE) {
+      console.error('Error fetching UniFi client snapshot', err?.message || err);
+    }
+    return null;
+  }
+}
+
+async function fetchHostSnapshot() {
+  // This function used to contain hard-coded SSH logic for specific hosts
+  // (for example a particular Plex server or llm-home instance). To keep
+  // this bridge generic and portable, that per-host logic has been
+  // removed in favor of config-driven, OpenClaw-tool-based inspection.
+  //
+  // The investigative HA agent (for example `openclaw/ha-bridge`) is
+  // expected to:
+  //   - Discover host configuration from files in the OpenClaw workspace
+  //     such as `config/ha_servers.json` or TOOLS.md.
+  //   - Use generic, read-only helpers (for example
+  //     `scripts/ha_server_inspect.sh`) via OpenClaw's exec/SSH tools to
+  //     answer questions like "what cron jobs are running on X?".
+  //
+  // For backward compatibility, we still expose UniFi Wi-Fi client counts
+  // here when configured. All other host-level observability should come
+  // from tools, not from hard-coded Node helpers.
+
+  const snapshot = {};
+
+  // UniFi Wi-Fi / network client snapshot (read-only)
+  try {
+    const unifi = await fetchUnifiClientSnapshot();
+    if (unifi) {
+      snapshot.unifi = unifi;
+    }
+  } catch (err) {
+    if (DEBUG_BRIDGE) {
+      console.error('Failed to build host_snapshot for UniFi', err.message || err);
+    }
+  }
+
+  return snapshot;
+}
+
 // Basic health check
 app.get('/healthz', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Optional debug endpoint to inspect the current host_snapshot that would
+// be passed to the brain. Useful while wiring up external controllers
+// like UniFi.
+app.get('/debug/host', async (_req, res) => {
+  try {
+    const snapshot = await fetchHostSnapshot();
+    res.json(snapshot || {});
+  } catch (err) {
+    console.error('Error in /debug/host', err);
+    res.status(500).json({ error: 'failed to build host_snapshot' });
+  }
 });
 
 /**
@@ -86,16 +314,38 @@ app.get('/healthz', (_req, res) => {
  * raw LLM endpoint. For now it is accepted but unused so we can migrate in
  * small, safe steps.
  */
-async function callBrain({ text, user, room, entities, conversationId, source, metadata, gatewayToken, sessionKey }) {
+async function callBrain({
+  text,
+  user,
+  room,
+  entities,
+  conversationId,
+  source,
+  metadata,
+  gatewayToken,
+  sessionKey,
+  // mode === 'control' → normal HA brain (may propose safe actions)
+  // mode === 'info'    → read-only informational brain (no actions)
+  mode = 'control',
+}) {
   const openclawBaseUrl = process.env.OPENCLAW_BASE_URL;
   const llmBaseUrl = openclawBaseUrl || process.env.LLM_BASE_URL;
   // Prefer a per-request gateway token when present; fall back to a static
   // API key for legacy setups that still talk directly to an LLM provider.
   const llmApiKey = gatewayToken || process.env.LLM_API_KEY;
-  const llmModel = openclawBaseUrl
-    ? 'openclaw/default'
-    : process.env.LLM_MODEL || 'gpt-4.1-mini';
   const userContext = metadata?.openclaw?.user_context || '';
+  const agentModelOverride = metadata?.openclaw?.agent_model || null;
+
+  // When talking to an OpenClaw Gateway, prefer a dedicated HA
+  // investigative agent model if configured. Precedence:
+  //   1) metadata.openclaw.agent_model (per-request override from HA)
+  //   2) OPENCLAW_AGENT_MODEL environment variable (recommended)
+  //   3) openclaw/default fallback
+  const openclawAgentModel = process.env.OPENCLAW_AGENT_MODEL || null;
+
+  const llmModel = openclawBaseUrl
+    ? agentModelOverride || openclawAgentModel || 'openclaw/default'
+    : process.env.LLM_MODEL || 'gpt-4.1-mini';
 
   // Fallback stub if no LLM is configured yet.
   if (!llmBaseUrl) {
@@ -121,6 +371,15 @@ Use ha_snapshot to answer questions about the current state of the home
 or does not contain the requested information, say so instead of
 hallucinating.
 
+You may also receive a host_snapshot object that contains read-only
+diagnostic information about important non-HA hosts (servers, routers,
+UniFi controllers, media servers, etc.). When the user asks about
+something outside of HA that host_snapshot covers (for example, how many
+Wi‑Fi clients are online), prefer to answer using host_snapshot instead
+of telling the user to check manually. Only say you cannot see that
+information when it is truly absent from host_snapshot and from any
+other tools available to you.
+
 In addition to Home Assistant, you may also have access to other
 OpenClaw tools and context (for example host health checks, SSH access
 to servers, UniFi controller APIs, or other services). For this Home
@@ -131,6 +390,28 @@ external systems. When the user asks about things outside of HA (such as
 OS patch status on a server or the number of UniFi clients), prefer
 using whatever tools OpenClaw exposes to you to answer accurately instead
 of guessing from ha_snapshot alone.
+
+For non-HA questions about specific servers (for example, "Are there any
+issues with Docker on llm-home?"), follow this pattern:
+- First, treat the question as **investigative/read-only** by default and
+  look for a config-driven host registry in the OpenClaw workspace to
+  resolve host labels to SSH targets.
+- If a matching host is configured, use only read-only diagnostics (for
+  example, running workspace helpers like a generic server-inspect script
+  via exec/SSH) to gather information and summarize it back to the user
+  in a concise way.
+- If the required config-driven task or host entry does not yet exist,
+  explicitly say that you do not know how to do this yet and ask the
+  user whether they want to wire it up. In that case, provide clear,
+  safe instructions (for example, which helper script to run on the
+  OpenClaw host to add the server), instead of attempting to change
+  SSH keys or config yourself.
+- If fulfilling the request would require performing **state-changing
+  actions** on non-HA systems (for example, restarting Docker, applying
+  updates, modifying configuration), clearly refuse to create or execute
+  such a config-driven task and explain that this violates your primary
+  safety rule for this Home Assistant pathway (you may only perform
+  read-only diagnostics outside of HA).
 
 The userPayload may include an "intent" field to hint what the user cares
 about. For example:
@@ -210,11 +491,21 @@ Schema:
 
 Keep actions minimal and safe by default. If in doubt, ask a clarifying question in reply_text and return an empty actions array.`;
 
-  const systemPrompt = userContext
-    ? `${baseSystemPrompt}\n\nUser-specific context (from Home Assistant configuration):\n${userContext}\n`
-    : baseSystemPrompt;
+  // Adjust behavior for read-only informational mode. In this mode the
+  // brain must **never** propose actions; it is an observability-only
+  // channel.
+  let systemPrompt = baseSystemPrompt;
+
+  if (mode === 'info') {
+    systemPrompt += `\n\nIMPORTANT: You are currently operating in a READ-ONLY, information-only mode.\n- You must NEVER propose or return any actions in the \\"actions\\" array.\n- Always return \\"actions\\": [] in your JSON response, even if the user asks to\n  turn things on/off, open/close, lock/unlock, arm/disarm, update, restart,\n  or otherwise change anything.\n- You may freely use any available tools, snapshots, or diagnostics to READ\n  state and explain it, but you must not plan or request changes.\n- When the user asks you to change something, clearly explain that this\n  pathway is informational-only and cannot perform actions, then answer with\n  whatever relevant READ-ONLY information you can provide.`;
+  }
+
+  if (userContext) {
+    systemPrompt += `\n\nUser-specific context (from Home Assistant configuration):\n${userContext}\n`;
+  }
 
   const haSnapshot = await fetchHaSnapshot();
+  const hostSnapshot = await fetchHostSnapshot();
 
   const previousTurn = sessionKey ? lastTurnsBySession.get(sessionKey) || null : null;
 
@@ -240,6 +531,7 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
     metadata,
     conversation_id: conversationId || null,
     ha_snapshot: haSnapshot,
+    host_snapshot: hostSnapshot,
     // NOTE: we intentionally do *not* include the gateway token here. The
     // token is for talking to OpenClaw, not for the upstream LLM, and
     // should never be exposed to third-party providers.
@@ -833,6 +1125,34 @@ app.post('/v1/conversation', async (req, res) => {
     user?.id || 'anon'
   }|device:${room?.device_id || 'none'}|sat:${room?.satellite_id || 'none'}`;
 
+  // Heuristic routing: decide whether this looks like a pure information
+  // query (read-only) or a control-style request. This lets a single
+  // Home Assistant Conversation agent support both general control and
+  // "observability Brian" questions over voice.
+  const inferInfoOnly = (rawText) => {
+    if (!rawText || typeof rawText !== 'string') return false;
+    const t = rawText.trim().toLowerCase();
+    if (!t) return false;
+
+    const isQuestion =
+      t.endsWith('?') ||
+      /^(what|where|when|who|whom|whose|why|how|is|are|do|does|did|can|could|should|would|will|am)\b/.test(
+        t,
+      );
+
+    const looksLikeImperative =
+      /^(turn|set|lock|unlock|open|close|arm|disarm|start|stop|run|update|install|restart|reboot|shutdown|power off|enable|disable)\b/.test(
+        t,
+      ) ||
+      /\bturn (on|off)\b/.test(t);
+
+    // Treat as info-only when it clearly looks like a question and not an
+    // imperative command. This allows queries like
+    // "is the plex server up to date with updates?" to be read-only even
+    // though they mention "updates".
+    return isQuestion && !looksLikeImperative;
+  };
+
   try {
     // First, check if this looks like a confirmation for a pending
     // security-sensitive action (unlock/open/disarm).
@@ -883,7 +1203,49 @@ app.post('/v1/conversation', async (req, res) => {
       pendingSecurityBySession.delete(sessionKey);
     }
 
-    // Step 1: ask the brain what to do (currently stubbed).
+    const infoOnly = inferInfoOnly(text);
+
+    if (infoOnly) {
+      // Read-only informational path: ask the brain in info mode and never
+      // execute or even expose actions.
+      const brainResult = await callBrain({
+        text,
+        user,
+        room,
+        entities,
+        conversationId,
+        source,
+        metadata: {
+          ...(metadata || {}),
+          mode: 'info_only',
+        },
+        gatewayToken,
+        sessionKey,
+        mode: 'info',
+      });
+
+      const response = {
+        reply_text: brainResult.replyText,
+        conversation_id: brainResult.conversationId,
+        actions: [],
+        executed_actions: [],
+        action_errors: [],
+        debug: {
+          source: source || 'unknown',
+          received_entities: entities || [],
+          metadata: metadata || {},
+          openclaw_base_url: OPENCLAW_BASE_URL,
+          ha_configured: Boolean(HA_BASE_URL && HA_TOKEN),
+          execute_ha_actions: false,
+          auth_required: Boolean(BRIDGE_API_KEY),
+          routed_as: 'info',
+        },
+      };
+
+      return res.json(response);
+    }
+
+    // Step 1: ask the brain what to do in normal control mode.
     const brainResult = await callBrain({
       text,
       user,
@@ -894,6 +1256,7 @@ app.post('/v1/conversation', async (req, res) => {
       metadata,
       gatewayToken,
       sessionKey,
+      mode: 'control',
     });
 
     // Split actions into those that can run immediately and those that
@@ -931,12 +1294,102 @@ app.post('/v1/conversation', async (req, res) => {
         ha_configured: Boolean(HA_BASE_URL && HA_TOKEN),
         execute_ha_actions: EXECUTE_HA_ACTIONS,
         auth_required: Boolean(BRIDGE_API_KEY),
+        routed_as: 'control',
       },
     };
 
     res.json(response);
   } catch (err) {
     console.error('Error in /v1/conversation', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Read-only informational endpoint.
+ *
+ * This endpoint is designed for "observability Brian": it allows any
+ * question about things OpenClaw can see (HA state, host snapshots,
+ * external tools) but **never** executes actions or proposes changes.
+ *
+ * - Uses the same brain + snapshots as /v1/conversation
+ * - Calls callBrain(mode: 'info') so the system prompt enforces actions: []
+ * - Ignores any actions the model might still try to return
+ */
+app.post('/v1/info', async (req, res) => {
+  const {
+    text,
+    conversation_id: conversationId,
+    user,
+    room,
+    entities,
+    source,
+    metadata,
+  } = req.body || {};
+
+  const authHeader = req.headers['authorization'] || '';
+  let gatewayToken = null;
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    gatewayToken = authHeader.slice(7).trim();
+  }
+
+  if (!OPENCLAW_BASE_URL && BRIDGE_API_KEY) {
+    if (!gatewayToken || gatewayToken !== BRIDGE_API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'Missing required field: text' });
+  }
+
+  // We still build a session key so the brain can use previous_turn
+  // context, but we do NOT support pending action confirmations here,
+  // because this endpoint is strictly read-only.
+  const sessionKey = `info|source:${source || 'unknown'}|user:${
+    user?.id || 'anon'
+  }|device:${room?.device_id || 'none'}|sat:${room?.satellite_id || 'none'}`;
+
+  try {
+    const brainResult = await callBrain({
+      text,
+      user,
+      room,
+      entities,
+      conversationId,
+      source,
+      // Hint to the brain that this is an info-only path.
+      metadata: {
+        ...(metadata || {}),
+        mode: 'info_only',
+      },
+      gatewayToken,
+      sessionKey,
+      mode: 'info',
+    });
+
+    const response = {
+      reply_text: brainResult.replyText,
+      conversation_id: brainResult.conversationId || conversationId || null,
+      // Enforce read-only contract at the bridge layer as well.
+      actions: [],
+      executed_actions: [],
+      action_errors: [],
+      debug: {
+        source: source || 'unknown',
+        received_entities: entities || [],
+        metadata: metadata || {},
+        openclaw_base_url: OPENCLAW_BASE_URL,
+        ha_configured: Boolean(HA_BASE_URL && HA_TOKEN),
+        execute_ha_actions: false,
+        auth_required: Boolean(BRIDGE_API_KEY),
+        mode: 'info',
+      },
+    };
+
+    res.json(response);
+  } catch (err) {
+    console.error('Error in /v1/info', err);
     res.status(500).json({ error: 'Internal error' });
   }
 });
