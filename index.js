@@ -6,7 +6,10 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const app = express();
-app.use(express.json());
+// Allow slightly larger JSON bodies from Home Assistant while still keeping
+// a sane upper bound. Default is ~100kb; we bump to 512kb to tolerate rich
+// metadata without risking unbounded growth.
+app.use(express.json({ limit: '512kb' }));
 
 const PORT = process.env.PORT || 8080;
 
@@ -676,7 +679,9 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
 const HA_SNAPSHOT_TTL_MS = 5000; // 5 seconds
 let lastHaSnapshot = null;
 let lastHaSnapshotTs = 0;
-const MAX_HA_SNAPSHOT_CHARS = 120000; // soft cap to avoid LLM context overflow
+// Aggressive soft cap to keep requests under the Gateway/LLM payload limit.
+// We prefer to send a smaller, focused snapshot rather than hitting HTTP 413.
+const MAX_HA_SNAPSHOT_CHARS = 40000;
 
 /**
  * Replace raw Home Assistant entity_ids in reply text with friendly names

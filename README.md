@@ -469,3 +469,32 @@ With this setup, new investigative questions routed through HA → ha-bridge →
 OpenClaw do **not** require any new per-scenario HTTP handlers in this repo;
 they are handled generically by the OpenClaw agent and its toolset, with
 per-host details living in workspace config instead of code.
+
+## Payload limits and common troubleshooting
+
+The bridge is designed to be conservative about request sizes so the
+Gateway/LLM layer does not return HTTP 413 (“Payload Too Large”) or similar
+errors:
+
+- The Express JSON body limit for `/v1/conversation` is raised to ~512 KB to
+  comfortably accept rich Home Assistant payloads while still keeping a
+  bounded maximum.
+- The internal Home Assistant snapshot (`ha_snapshot`) is aggressively
+  trimmed before sending to the LLM, prioritising the most relevant domains
+  (locks, doors, alarm, lights, switches, scenes, climate, media, etc.) and
+  capping the final JSON size to avoid oversized payloads.
+
+If you see errors like `PayloadTooLargeError: request entity too large` in the
+bridge logs or HTTP 413 responses from the Gateway, make sure you are running
+the current version of this service (with the 512 KB body limit and
+aggressive snapshot trimming) and that you are not wrapping it in another
+reverse proxy with a smaller body limit.
+
+If you see `Cannot POST /chat/completions` or 404 responses when the bridge
+tries to call the brain, double-check `OPENCLAW_BASE_URL`:
+
+- It **must** point at the OpenClaw Gateway’s `/v1` base, for example
+  `http://openclaw-gateway:18789/v1` or `http://192.168.5.125:18789/v1`.
+- It should **not** point back to the bridge itself (for example
+  `http://localhost:8080`), otherwise `/chat/completions` will hit the
+  bridge instead of the Gateway and always return a 404.
