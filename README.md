@@ -349,6 +349,53 @@ Instead, the behavior is:
     commands via OpenClaw tools), but the bridge will not execute HA actions
     for them.
 
+## What the OpenClaw Conversation Agent is allowed to do
+
+The OpenClaw Conversation Agent is intentionally limited. These limits are
+by design, for safety and reproducibility.
+
+### Allowed
+
+- **Normal Home Assistant control** in safe domains when you use imperative
+  phrasing and `EXECUTE_HA_ACTIONS=true`:
+  - Examples: "turn on the kitchen lights", "set the bedroom to 72",
+    "lock the front door", "close the garage door", "arm the alarm".
+  - The brain returns `ha_service` actions, and ha-bridge enforces
+    confirmation rules for unlock/open/disarm.
+- **Read-only / investigative questions** about:
+  - Home state (lights, doors, climate, scenes, etc.).
+  - Non-HA systems (servers, Docker, UniFi, NAS) using tools like
+    `config/ha_servers.json` + `scripts/ha_server_inspect.sh` and other
+    read-only helpers.
+  - Examples: "What cron jobs are running on llm-home?",
+    "Are there any issues with Docker on llm-home?",
+    "How many Wi-Fi clients are on the network?".
+
+### Not allowed (by design)
+
+- **State-changing actions outside of Home Assistant**:
+  - The HA pathway is strictly read-only for non-HA systems. The agent
+    may not restart Plex, reboot servers, restart Docker, apply updates,
+    edit configs, or change UniFi/NAS settings.
+  - When you ask for one of these (for example "reboot Plex" or
+    "restart Docker on llm-home"), the agent is instructed to refuse with
+    this exact message:
+
+    > I am sorry but there are limitations to what I am allowed to do. Any actions like what you asked is not permitted for security reasons.
+
+- **Automatic SSH / config mutation from HA**:
+  - The agent will not silently change SSH keys, write new hosts, or
+    rewire config files when a request comes through Home Assistant.
+  - Instead it will explain what config is missing (for example a host
+    entry in `config/ha_servers.json`) and ask if you want to wire it up,
+    usually by running a helper script or editing a file on the
+    OpenClaw host yourself.
+
+These constraints are deliberate: OpenClaw + ha-bridge handle HA control
+and cross-host observability, but any non-HA state changes must be done in
+an explicit maintenance channel (CLI, direct OpenClaw session, etc.), not
+through the Home Assistant Conversation Agent.
+
 ### OpenClaw-side requirements (reproducible setup)
 
 To make this generic behavior work on any OpenClaw deployment:
