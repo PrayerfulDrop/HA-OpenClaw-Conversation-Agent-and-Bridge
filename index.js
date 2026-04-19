@@ -639,11 +639,30 @@ Keep actions minimal and safe by default. If in doubt, ask a clarifying question
       user?.name || user?.id || 'an unknown user'
     }${room?.name ? ` in the ${room.name}` : ''}.`;
 
-    const fallbackReply = openclawBaseUrl
-      ? 'I could not reach the OpenClaw brain just now. ' +
+    // If this looks like a non-HA state-changing request (for example,
+    // "reboot plex" or "shutdown the plex server"), we deliberately do
+    // NOT surface a connectivity-style error. Instead we return the
+    // explicit safety message that the user expects from this HA
+    // pathway.
+    const looksLikeNonHaStateChange = (() => {
+      if (!lowerText) return false;
+      const verbs = /(reboot|restart|shutdown|shut down|power off|poweroff|update|upgrade|apply updates?)/;
+      const hosts = /(plex|llm-home|wardnas|ward-nas|nas|unifi|router)/;
+      return verbs.test(lowerText) && hosts.test(lowerText);
+    })();
+
+    let fallbackReply;
+    if (openclawBaseUrl && looksLikeNonHaStateChange) {
+      fallbackReply =
+        'I am sorry but there are limitations to what I am allowed to do. Any actions like what you asked is not permitted for security reasons.';
+    } else if (openclawBaseUrl) {
+      fallbackReply =
+        'I could not reach the OpenClaw brain just now. ' +
         'Please check that the OpenClaw Conversation Agent in Home Assistant has the correct Bridge URL and Gateway token, ' +
-        'and that the Gateway\'s /v1/chat/completions HTTP endpoint is enabled. '
-      : replyText;
+        "and that the Gateway's /v1/chat/completions HTTP endpoint is enabled. ";
+    } else {
+      fallbackReply = replyText;
+    }
 
     return {
       replyText: fallbackReply,
